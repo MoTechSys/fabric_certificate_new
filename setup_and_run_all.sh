@@ -1,142 +1,153 @@
-#!/bin/bash
-set -e
-# تشغيل سكربت إصلاح الصلاحيات فقط في بيئة CI أو عند طلب صريح عبر FIX_PERMISSIONS
-# يمكن فرض التشغيل محليًا بتشغيل: FIX_PERMISSIONS=true ./setup_and_run_all.sh
-if [ "${CI:-}" = "true" ] || [ "${CI:-}" = "1" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ "${FIX_PERMISSIONS:-}" = "true" ]; then
-  if [ -x "./scripts/fix-permissions.sh" ]; then
-    echo "🔐 Running scripts/fix-permissions.sh to fix permissions (CI or FIX_PERMISSIONS set)..."
-    ./scripts/fix-permissions.sh || true
-  else
-    echo "⚠️ scripts/fix-permissions.sh not found or not executable. Skipping."
-  fi
-else
-  echo "ℹ️ Not in CI and FIX_PERMISSIONS not set; skipping permission fix."
-fi
-# 1. مسح أي حاويات أو شبكات قديمة متبقية بالقوة
-docker rm -f $(docker ps -aq) || true
-docker volume prune -f
+package chaincode
 
-# --------------------------------------------------------
-# Deep Clean: إزالة صور Docker التي تبدأ بـ dev-* أو dev-peer*
-# هذا يضمن بناء صور العقد الذكي الجديدة بدلاً من إعادة استخدام القديمة
-# --------------------------------------------------------
-echo -e "\n🧹 Performing deep-clean for Docker images starting with dev-*..."
-# جمع معرفات الصور المطابقة
-DEV_IMAGE_IDS=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^(dev-|dev-peer)/ {print $2}' || true)
-if [ -n "$DEV_IMAGE_IDS" ]; then
-  echo "Found dev images: $DEV_IMAGE_IDS"
-  docker rmi -f $DEV_IMAGE_IDS || true
-else
-  echo "No dev-* images found."
-fi
+import (
+	"encoding/json"
+	"fmt"
 
-# 2. مسح التقارير القديمة للتأكد أن التقرير الناتج هو الجديد
-rm -f caliper-workspace/report.html
+	"github.com/hyperledger/fabric-contract-api-go/v2/contractapi"
+)
 
-# 3. التأكد من تحديث الـ Workspace
-cd caliper-workspace && rm -rf networks/networkConfig.yaml && cd ..
+// SmartContract defines the structure for our certificate functions
+type SmartContract struct {
+	contractapi.Contract
+}
 
-# تعريف الألوان للنصوص
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m'
+// Certificate Structure representing the degree data in CouchDB
+type Certificate struct {
+	CertHash    string `json:"CertHash"`
+	Degree      string `json:"Degree"`
+	ID          string `json:"ID"`
+	IsRevoked   bool   `json:"IsRevoked"`
+	IssueDate   string `json:"IssueDate"`
+	Issuer      string `json:"Issuer"`
+	StudentName string `json:"StudentName"`
+}
 
-echo -e "${GREEN}🚀 Starting Full Project Setup (Fabric + Caliper)...${NC}"
-echo "=================================================="
+// Helper: getClientMSP retrieves the organization ID of the caller
+func (s *SmartContract) getClientMSP(ctx contractapi.TransactionContextInterface) (string, error) {
+	clientIdentity := ctx.GetClientIdentity()
+	mspID, err := clientIdentity.GetMSPID()
+	if err != nil {
+		return "", fmt.Errorf("failed to read client identity: %v", err)
+	}
+	return mspID, nil
+}
 
-# --------------------------------------------------------
-# 1. التأكد من وجود الأدوات
-# --------------------------------------------------------
-echo -e "${GREEN}📦 Step 1: Checking Fabric Binaries...${NC}"
-if [ ! -d "bin" ]; then
-    echo "⬇️ Downloading Fabric tools..."
-    curl -sSL https://bit.ly/2ysbOFE | bash -s -- 2.5.9 1.5.7
-else
-    echo "✅ Fabric tools found."
-fi
+// 1️⃣ IssueCertificate (Org1 Only)
+func (s *SmartContract) IssueCertificate(
+	ctx contractapi.TransactionContextInterface,
+	id string,
+	studentName string,
+	degree string,
+	issuer string,
+	certHash string,
+	issueDate string) error {
 
-export PATH=${PWD}/bin:$PATH
-export FABRIC_CFG_PATH=${PWD}/config/
+	// RBAC CHECK
+	mspID, err := s.getClientMSP(ctx)
+	if err != nil || mspID != "Org1MSP" {
+		return fmt.Errorf("access denied: only Org1 can issue certificates")
+	}
 
-# 1. تشغيل الشبكة
-cd test-network
-./network.sh down
-./network.sh up createChannel -c mychannel -ca -s couchdb
-cd ..
+	exists, err := s.CertificateExists(ctx, id)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("certificate %s already exists", id)
+	}
 
-# 2. نشر العقد الذكي
-echo "📜 Deploying Smart Contract with AND Policy..."
-cd test-network
-./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-go -ccl go -ccep "AND('Org1MSP.peer','Org2MSP.peer')"
-cd ..
+	cert := Certificate{
+		ID:          id,
+		StudentName: studentName,
+		Degree:      degree,
+		Issuer:      issuer,
+		CertHash:    certHash,
+		IssueDate:   issueDate,
+		IsRevoked:   false,
+	}
 
-# 3. تشغيل Caliper
-cd caliper-workspace
+	certJSON, err := json.Marshal(cert)
+	if err != nil {
+		return err
+	}
 
-if [ ! -d "node_modules" ]; then
-    npm install
-    npx caliper bind --caliper-bind-sut fabric:2.2
-fi
+	return ctx.GetStub().PutState(id, certJSON)
+}
 
-echo "🔑 Detecting Private Keys..."
+// 2️⃣ RevokeCertificate (Org2 Only)
+func (s *SmartContract) RevokeCertificate(
+	ctx contractapi.TransactionContextInterface,
+	id string) error {
 
-# Org1 Key
-KEY_DIR1="../test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore"
-PVT_KEY1=$(ls $KEY_DIR1/*_sk)
+	mspID, err := s.getClientMSP(ctx)
+	if err != nil || mspID != "Org2MSP" {
+		return fmt.Errorf("access denied: only Org2 can revoke certificates")
+	}
 
-# Org2 Key
-KEY_DIR2="../test-network/organizations/peerOrganizations/org2.example.com/users/User1@org2.example.com/msp/keystore"
-PVT_KEY2=$(ls $KEY_DIR2/*_sk)
+	cert, err := s.ReadCertificate(ctx, id)
+	if err != nil {
+		return err
+	}
 
-echo "Org1 Key: $PVT_KEY1"
-echo "Org2 Key: $PVT_KEY2"
+	if cert.IsRevoked {
+		return nil 
+	}
 
-mkdir -p networks
+	cert.IsRevoked = true
+	certJSON, err := json.Marshal(cert)
+	if err != nil {
+		return err
+	}
 
-cat << EOF > networks/networkConfig.yaml
-name: Caliper-Fabric
-version: "2.0.0"
+	return ctx.GetStub().PutState(id, certJSON)
+}
 
-caliper:
-  blockchain: fabric
+// 3️⃣ VerifyCertificate (Open Read)
+func (s *SmartContract) VerifyCertificate(
+	ctx contractapi.TransactionContextInterface,
+	id string,
+	certHash string) (bool, error) {
 
-channels:
-  - channelName: mychannel
-    contracts:
-      - id: basic
+	cert, err := s.ReadCertificate(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("verification failed: certificate not found")
+	}
 
-organizations:
-  - mspid: Org1MSP
-    identities:
-      certificates:
-        - name: User1
-          clientPrivateKey:
-            path: $PVT_KEY1
-          clientSignedCert:
-            path: ../test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts/cert.pem
-    connectionProfile:
-      path: ../test-network/organizations/peerOrganizations/org1.example.com/connection-org1.yaml
-      discover: true
+	isValid := cert.CertHash == certHash && !cert.IsRevoked
+	return isValid, nil
+}
 
-  - mspid: Org2MSP
-    identities:
-      certificates:
-        - name: User1
-          clientPrivateKey:
-            path: $PVT_KEY2
-          clientSignedCert:
-            path: ../test-network/organizations/peerOrganizations/org2.example.com/users/User1@org2.example.com/msp/signcerts/cert.pem
-    connectionProfile:
-      path: ../test-network/organizations/peerOrganizations/org2.example.com/connection-org2.yaml
-      discover: true
-EOF
+// 4️⃣ ReadCertificate (Helper)
+func (s *SmartContract) ReadCertificate(
+	ctx contractapi.TransactionContextInterface,
+	id string) (*Certificate, error) {
 
-echo "🔥 Running Benchmark..."
+	certJSON, err := ctx.GetStub().GetState(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read from world state: %v", err)
+	}
+	if certJSON == nil {
+		return nil, fmt.Errorf("certificate %s does not exist", id)
+	}
 
-npx caliper launch manager \
-    --caliper-workspace . \
-    --caliper-networkconfig networks/networkConfig.yaml \
-    --caliper-benchconfig benchmarks/benchConfig.yaml \
-    --caliper-flow-only-test
+	var cert Certificate
+	err = json.Unmarshal(certJSON, &cert)
+	if err != nil {
+		return nil, err
+	}
 
-echo "✅ Finished. Report at caliper-workspace/report.html"
+	return &cert, nil
+}
+
+// 5️⃣ CertificateExists (Helper)
+func (s *SmartContract) CertificateExists(
+	ctx contractapi.TransactionContextInterface,
+	id string) (bool, error) {
+
+	certJSON, err := ctx.GetStub().GetState(id)
+	if err != nil {
+		return false, err
+	}
+	return certJSON != nil, nil
+}
