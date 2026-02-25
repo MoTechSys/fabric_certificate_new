@@ -61,8 +61,9 @@ cd test-network
 docker volume prune -f
 docker system prune -f
 ./network.sh up createChannel -c mychannel -ca -s couchdb
-echo "⏳ Waiting for CouchDB to stabilize..."
-sleep 20
+# زيادة وقت الانتظار إلى 30 ثانية لضمان استقرار CouchDB والـ Peers
+echo "⏳ Waiting 30 seconds for CouchDB and Peers to stabilize..."
+sleep 30
 cd ..
 
 # 3. نشر العقد الذكي (تعديل السياسة إلى OR لحل مشكلة الـ 1504 فشل)
@@ -91,7 +92,7 @@ echo "Org2 Key: $PVT_KEY2"
 
 mkdir -p networks
 
-# ج) إنشاء ملف إعدادات الشبكة بتنسيق YAML سليم ومسارات شهادات دقيقة
+# ج) إنشاء ملف إعدادات الشبكة بتنسيق YAML سليم ومسارات دقيقة (تم تصحيح المسافات هنا)
 cat << EOF > networks/networkConfig.yaml
 name: Caliper-Fabric
 version: "2.0.0"
