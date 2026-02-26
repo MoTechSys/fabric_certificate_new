@@ -1,6 +1,7 @@
 'use strict';
 
 const { WorkloadModuleBase } = require('@hyperledger/caliper-core');
+const crypto = require('crypto'); // استخدام مكتبة التشفير لمحاكاة الواقع
 
 class VerifyCertificateWorkload extends WorkloadModuleBase {
     constructor() {
@@ -10,22 +11,23 @@ class VerifyCertificateWorkload extends WorkloadModuleBase {
 
     async submitTransaction() {
         this.txIndex++;
-        // نبحث عن نفس الشهادة التي أصدرناها في الخطوة السابقة
-        const certID = `cert_${this.workerIndex}_${this.txIndex}`;
+        
+        const certID = `CERT_${this.workerIndex}_${this.txIndex}`;
+        const studentName = `Student_${this.workerIndex}_${this.txIndex}`;
+        
+        // توليد الهاش باستخدام SHA-256 ليطابق عملية الإصدار
+        const certHash = crypto.createHash('sha256').update(certID + studentName).digest('hex');
 
         const request = {
             contractId: 'basic',
-            contractFunction: 'ReadAsset',
-            contractArguments: [certID],
-            readOnly: true
+            contractFunction: 'VerifyCertificate', 
+            contractArguments: [certID, certHash],
+            readOnly: true 
         };
 
-        await this.sutAdapter.sendRequests(request);
+        // إرجاع النتيجة لمحرك Caliper لتسجيلها في التقرير النهائي
+        return this.sutAdapter.sendRequests(request);
     }
 }
 
-function createWorkloadModule() {
-    return new VerifyCertificateWorkload();
-}
-
-module.exports.createWorkloadModule = createWorkloadModule;
+module.exports.createWorkloadModule = () => new VerifyCertificateWorkload();

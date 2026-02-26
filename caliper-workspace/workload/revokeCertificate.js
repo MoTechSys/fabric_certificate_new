@@ -10,22 +10,19 @@ class RevokeCertificateWorkload extends WorkloadModuleBase {
 
     async submitTransaction() {
         this.txIndex++;
-        // نحذف نفس الشهادة التي تم إنشاؤها
-        const certID = `cert_${this.workerIndex}_${this.txIndex}`;
+        const workerId = this.workerIndex || 0;
+        const certID = `CERT_${workerId}_${this.txIndex}`;
 
         const request = {
             contractId: 'basic',
-            contractFunction: 'DeleteAsset',
+            contractFunction: 'RevokeCertificate',
             contractArguments: [certID],
             readOnly: false
         };
 
-        await this.sutAdapter.sendRequests(request);
+        // تحسين: استخدام return لضمان قياس زمن الكمون (Latency) الفعلي للمعاملة
+        return this.sutAdapter.sendRequests(request);
     }
 }
 
-function createWorkloadModule() {
-    return new RevokeCertificateWorkload();
-}
-
-module.exports.createWorkloadModule = createWorkloadModule;
+module.exports.createWorkloadModule = () => new RevokeCertificateWorkload();
